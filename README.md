@@ -23,4 +23,5 @@ kubectl apply -f loki.yaml
 kubectl apply -f grafana.yaml
 
 
-## 3.目前使用本地host存储数据，如果集群内有storageclass，可以修改执行loki-pvc.yaml，并修改另外两个文件适配服务文件
+## 3.使用pvc
+目前使用本地host存储数据，如果集群内有storageclass，可以修改执行loki-pvc.yaml，并修改另外两个文件适配服务文件
