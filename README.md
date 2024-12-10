@@ -10,6 +10,7 @@ chmod 777 /data/grafana
 
 chmod 777 /data/loki
 
+
 2.部署loki 日志服务
 master1上执行
 
@@ -20,5 +21,6 @@ kubectl label node dev-k8s-master-1 loki=true
 kubectl apply -f loki.yaml
 
 kubectl apply -f grafana.yaml
+
 
 3.目前使用本地host存储数据，如果集群内有storageclass，可以修改执行loki-pvc.yaml，并修改另外两个文件适配服务文件
