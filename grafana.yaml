@@ -1,0 +1,56 @@
+# grafana-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grafana
+  labels:
+    app: grafana
+  namespace: loki
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: grafana
+  template:
+    metadata:
+      labels:
+        app: grafana
+    spec:
+      nodeName: dev-k8s-master-1
+      containers:
+        - name: grafana
+          image: swr.cn-north-4.myhuaweicloud.com/zkhz-rmzk/infra:grafana_10.1.0
+          ports:
+            - containerPort: 3000
+          volumeMounts:
+            - name: grafana-data
+              mountPath: /var/lib/grafana
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "512Mi"
+            limits:
+              cpu: "2"
+              memory: "4Gi"
+      volumes:
+        - name: grafana-data
+          hostPath:
+            path: /data/grafana
+            type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana
+  labels:
+    app: grafana
+  namespace: loki
+spec:
+  type: NodePort
+  ports:
+    - port: 3000
+      targetPort: 3000
+      nodePort: 32000 # 自定义的 NodePort 端口，可以在 30000-32767 之间选择
+  selector:
+    app: grafana
+

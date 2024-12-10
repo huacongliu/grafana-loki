@@ -1,0 +1,540 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: loki
+  namespace: loki
+data:
+  loki.yaml: |
+    auth_enabled: false
+    chunk_store_config:
+      max_look_back_period: 0s
+    compactor:
+      shared_store: filesystem
+      working_directory: /data/loki/boltdb-shipper-compactor
+      retention_enabled: true
+      compaction_interval: 10m
+      retention_delete_delay: 1h
+      retention_delete_worker_count: 150
+    ingester:
+      chunk_block_size: 262144
+      chunk_idle_period: 3m
+      chunk_retain_period: 1m
+      lifecycler:
+        final_sleep: 0s
+        ring:
+          kvstore:
+            store: inmemory
+          replication_factor: 1
+      max_transfer_retries: 0
+      wal: 
+        enabled: true
+        dir: /data/loki/wal
+        flush_on_shutdown: true
+        checkpoint_duration: 5m
+        replay_memory_ceiling: 1GB
+    limits_config:
+      ingestion_rate_strategy: local
+      # 每个用户每秒的采样率限制
+      ingestion_rate_mb: 15
+      # 每个用户允许的采样突发大小
+      ingestion_burst_size_mb: 20
+      retention_period: 48h
+      enforce_metric_name: false
+      reject_old_samples: true
+      reject_old_samples_max_age: 48h
+    schema_config:
+      configs:
+      - from: "2020-10-24"
+        index:
+          period: 24h
+          prefix: index_
+        object_store: filesystem
+        schema: v11
+        store: boltdb-shipper
+    server:
+      http_listen_port: 3100
+    storage_config:
+      boltdb_shipper:
+        active_index_directory: /data/loki/boltdb-shipper-active
+        cache_location: /data/loki/boltdb-shipper-cache
+        cache_ttl: 2h
+        shared_store: filesystem
+      filesystem:
+        directory: /data/loki/chunks
+    table_manager:
+      retention_deletes_enabled: true
+      retention_period: 720h
+---
+# Source: loki/templates/role.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: loki
+  namespace: loki
+  labels:
+    app: loki
+    chart: loki-2.6.0
+    heritage: Helm
+    release: loki
+rules:
+- apiGroups:      ['extensions']
+  resources:      ['podsecuritypolicies']
+  verbs:          ['use']
+  resourceNames:  [loki]
+
+---
+# Source: loki/templates/rolebinding.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: loki
+  namespace: loki
+  labels:
+    app: loki
+    chart: loki-2.6.0
+    heritage: Helm
+    release: loki
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: loki
+subjects:
+- kind: ServiceAccount
+  name: loki
+
+---
+# Source: loki/templates/serviceaccount.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: loki
+  namespace: loki
+automountServiceAccountToken: true
+
+---
+# Source: loki/templates/service-headless.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: loki-headless
+  namespace: loki
+spec:
+  clusterIP: None
+  ports:
+    - port: 3100
+      protocol: TCP
+      name: http-metrics
+      targetPort: http-metrics
+  selector:
+    app: loki
+
+---
+# Source: loki/templates/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: loki
+  namespace: loki
+spec:
+  type: ClusterIP
+  ports:
+    - port: 3100
+      protocol: TCP
+      name: http-metrics
+      targetPort: http-metrics
+  selector:
+    app: loki
+
+---
+# Source: loki/templates/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: loki-ns
+  namespace: loki
+spec:
+  type: NodePort
+  ports:
+    - port: 3100
+      protocol: TCP
+      name: http-metrics
+      targetPort: http-metrics
+      nodePort: 30961
+  selector:
+    app: loki
+
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: loki
+  namespace: loki
+spec:
+  updateStrategy:
+    type: RollingUpdate
+  podManagementPolicy: OrderedReady
+  replicas: 1
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      app: loki
+  serviceName: loki-headless
+  template:
+    metadata:
+      annotations:
+        prometheus.io/port: http-metrics
+        prometheus.io/scrape: "true"
+      labels:
+        app: loki
+        name: loki
+    spec:
+      affinity: {}
+      nodeSelector:
+        kubernetes.io/os: "linux"
+      nodeName: dev-k8s-master-1
+      containers:
+      - args:
+        - -config.file=/etc/loki/loki.yaml
+        image: swr.cn-north-4.myhuaweicloud.com/zkhz-rmzk/infra:loki_2.3.0
+        imagePullPolicy: IfNotPresent
+        livenessProbe:
+          failureThreshold: 3
+          httpGet:
+            path: /ready
+            port: http-metrics
+            scheme: HTTP
+          initialDelaySeconds: 45
+          periodSeconds: 10
+          successThreshold: 1
+          timeoutSeconds: 1
+        name: loki
+        ports:
+        - containerPort: 3100
+          name: http-metrics
+          protocol: TCP
+        readinessProbe:
+          failureThreshold: 3
+          httpGet:
+            path: /ready
+            port: http-metrics
+            scheme: HTTP
+          initialDelaySeconds: 45
+          periodSeconds: 10
+          successThreshold: 1
+          timeoutSeconds: 1
+        resources:
+          limits:
+            cpu: 2
+            memory: 5Gi
+          requests:
+            cpu: 100m
+            memory: 100Mi
+        volumeMounts:
+        - mountPath: /etc/loki
+          name: config
+        - mountPath: /data
+          name: storage
+      dnsPolicy: ClusterFirst
+      restartPolicy: Always
+      schedulerName: default-scheduler
+      securityContext:
+        runAsGroup: 0
+        runAsNonRoot: false
+        runAsUser: 0
+      serviceAccount: loki
+      serviceAccountName: loki
+      terminationGracePeriodSeconds: 4800
+      nodeSelector:
+        enableai: "true"
+      tolerations:
+      - operator: Exists
+      - effect: NoSchedule
+        key: node-role.kubernetes.io/master
+      volumes:
+      - name: config
+        configMap:
+          name: loki
+      #- name: storage
+      #  persistentVolumeClaim:
+      #    claimName: loki-data
+      - hostPath:
+          path: /data/loki
+          type: DirectoryOrCreate
+        name: storage
+
+---
+apiVersion: v1
+data:
+  promtail.yaml: |
+    client:
+      backoff_config:
+        max_period: 5m
+        max_retries: 10
+        min_period: 500ms
+      batchsize: 1048576
+      batchwait: 1s
+      external_labels: {}
+      timeout: 10s
+    positions:
+      filename: /run/promtail/positions.yaml
+    server:
+      http_listen_port: 3101
+    target_config:
+      sync_period: 10s
+    scrape_configs:
+    - job_name: kubernetes-pods-app
+      pipeline_stages:
+      - drop:          
+          expression: ".*(error).*(filetarget.go).*(no such file).*"
+      - drop:
+          expression: ".*(warn).*(scrape.go).*(too old or are too far into the future).*"
+      kubernetes_sd_configs:
+      - role: pod
+      relabel_configs:
+      - action: drop
+        regex: (fluent-bit.+|logging-agent-.+)
+        source_labels:
+        - __meta_kubernetes_pod_name
+      - source_labels:
+        - __meta_kubernetes_pod_node_name
+        target_label: __host__
+      - source_labels:
+        - __meta_kubernetes_pod_node_name
+        target_label: node_name
+      - action: replace
+        source_labels:
+        - __meta_kubernetes_namespace
+        target_label: namespace
+      - action: replace
+        source_labels:
+        - __meta_kubernetes_pod_name
+        target_label: pod
+      - action: replace
+        source_labels:
+        - __meta_kubernetes_pod_container_name
+        target_label: container
+      - replacement: /var/log/pods/*$1/*.log
+        separator: /
+        source_labels:
+        - __meta_kubernetes_pod_uid
+        - __meta_kubernetes_pod_container_name
+        target_label: __path__
+    - job_name: kubernetes-pods-static
+      pipeline_stages:
+      - drop:          
+          expression: ".*(error).*(filetarget.go).*(no such file).*"
+      - drop:
+          expression: ".*(warn).*(scrape.go).*(too old or are too far into the future).*"
+      - multiline:
+          firstline: '^\[\d{4}-\d{2}-\d{2} \d{1,2}:\d{2}:\d{2}\]'
+          max_wait_time: 3s
+      kubernetes_sd_configs:
+      - role: pod
+      relabel_configs:
+      - action: drop
+        regex: ''
+        source_labels:
+        - __meta_kubernetes_pod_annotation_kubernetes_io_config_mirror
+      - source_labels:
+        - __meta_kubernetes_pod_node_name
+        target_label: __host__
+      - source_labels:
+        - __meta_kubernetes_pod_node_name
+        target_label: node_name
+      - action: replace
+        source_labels:
+        - __meta_kubernetes_namespace
+        target_label: namespace
+      - action: replace
+        source_labels:
+        - __meta_kubernetes_pod_name
+        target_label: pod
+      - action: replace
+        source_labels:
+        - __meta_kubernetes_pod_container_name
+        target_label: container
+      - replacement: /var/log/pods/**/*.log
+        separator: /
+        source_labels:
+        - __meta_kubernetes_pod_annotation_kubernetes_io_config_mirror
+        - __meta_kubernetes_pod_container_name
+        target_label: __path__
+kind: ConfigMap
+metadata:
+  name: loki-promtail
+  namespace: loki
+
+---
+# Source: promtail/templates/clusterrole.yaml
+kind: ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: promtail
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - nodes
+      - nodes/proxy
+      - services
+      - endpoints
+      - pods
+    verbs:
+      - get
+      - watch
+      - list
+
+---
+# Source: promtail/templates/clusterrolebinding.yaml
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: promtail
+subjects:
+  - kind: ServiceAccount
+    name: promtail
+    namespace: loki
+roleRef:
+  kind: ClusterRole
+  name: promtail
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# Source: promtail/templates/serviceaccount.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: promtail
+  namespace: loki
+automountServiceAccountToken: true
+
+
+
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: promtail
+  namespace: loki
+  labels:
+    app: promtail
+    app.kubernetes.io/managed-by: Helm
+    chart: promtail-2.3.0
+    heritage: Helm
+    release: loki
+spec:
+  updateStrategy:
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      app: promtail
+      release: loki
+  template:
+    metadata:
+      annotations:
+        prometheus.io/port: http-metrics
+        prometheus.io/scrape: "true"
+      labels:
+        app: promtail
+        release: loki
+    spec:
+      affinity: {}
+      nodeSelector:
+        kubernetes.io/os: "linux"
+      containers:
+      - args:
+        - -config.file=/etc/promtail/promtail.yaml
+        - -client.url=http://loki:3100/loki/api/v1/push
+        env:
+        - name: HOSTNAME
+          valueFrom:
+            fieldRef:
+              apiVersion: v1
+              fieldPath: spec.nodeName
+        image: swr.cn-north-4.myhuaweicloud.com/zkhz-rmzk/infra:promtail_2.3.0
+        imagePullPolicy: IfNotPresent
+        name: promtail
+        ports:
+        - containerPort: 3101
+          name: http-metrics
+          protocol: TCP
+        readinessProbe:
+          failureThreshold: 5
+          httpGet:
+            path: /ready
+            port: http-metrics
+            scheme: HTTP
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          successThreshold: 1
+          timeoutSeconds: 1
+        resources:
+          limits:
+            cpu: 1
+            memory: 1024Mi
+          requests:
+            cpu: 100m
+            memory: 100Mi
+        securityContext:
+          readOnlyRootFilesystem: true
+          runAsGroup: 0
+          runAsUser: 0
+        volumeMounts:
+        - mountPath: /etc/promtail
+          name: config
+        - mountPath: /run/promtail
+          name: run
+        - mountPath: /var/lib/docker/containers
+          name: docker
+          readOnly: true
+        - mountPath: /var/log/pods
+          name: pods
+          readOnly: true
+        - mountPath: /var/log/journal
+          name: journal-log
+          readOnly: true
+        - mountPath: /var/run/systemd/journal/socket
+          name: journal-socket
+        - mountPath: /data/online-pipeline
+          name: app-log
+      dnsPolicy: ClusterFirst
+      restartPolicy: Always
+      schedulerName: default-scheduler
+      securityContext: {}
+      serviceAccount: promtail
+      serviceAccountName: promtail
+      terminationGracePeriodSeconds: 30
+      nodeSelector:
+        loki: "true"
+      tolerations:
+      - operator: Exists
+      - effect: NoSchedule
+        key: node-role.kubernetes.io/master
+      volumes:
+      - configMap:
+          defaultMode: 420
+          name: loki-promtail
+        name: config
+      - hostPath:
+          path: /run/promtail
+          type: ""
+        name: run
+      - hostPath:
+          path: /var/lib/docker/containers
+          type: ""
+        name: docker
+      - hostPath:
+          path: /var/log/pods
+          type: ""
+        name: pods
+      - hostPath:
+          path: /var/log/journal
+          type: ""
+        name: journal-log
+      - hostPath:
+          path: /var/run/systemd/journal/socket
+        name: journal-socket
+      - hostPath:
+          path: /data/online-pipeline/
+        name: app-log
